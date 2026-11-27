@@ -1,9 +1,11 @@
-"""Roda o estudo completo: baixa dados, otimiza no TREINO, valida no TESTE.
+"""Roda o estudo completo de UM par: baixa dados, otimiza no TREINO, valida no TESTE.
 
 Uso:
     python rodar_backtest.py                              # BTC-USDT, 1H, desde 2023
     python rodar_backtest.py --par ETH-USDT --timeframe 15m --inicio 2024-01-01
     python rodar_backtest.py --taxa 0.0008 --slippage 0.0003
+
+Para vários pares de uma vez, use `rodar_varios.py`.
 
 Lógica anti-autoengano:
 1. Os dados são divididos em TREINO (70% mais antigos) e TESTE (30% mais recentes).
@@ -27,34 +29,49 @@ from bot.estrategias import GRADES, comprar_e_segurar
 
 PASTA_RESULTADOS = Path(__file__).resolve().parent / "resultados"
 MIN_TRADES_TREINO = 20  # menos que isso é amostra pequena demais para confiar
+MIN_TRADES_TESTE = 30
 
 
 def avaliar(df: pd.DataFrame, sinal: pd.Series, custos: Custos, timeframe: str) -> dict:
     return metricas.calcular(rodar_backtest(df, sinal, custos), timeframe)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--par", default="BTC-USDT")
-    ap.add_argument("--timeframe", default="1H", choices=list(metricas.CANDLES_POR_ANO))
-    ap.add_argument("--inicio", default="2023-01-01")
-    ap.add_argument("--treino", type=float, default=0.7, help="fração dos dados usada para otimizar")
-    ap.add_argument("--taxa", type=float, default=0.0010)
-    ap.add_argument("--slippage", type=float, default=0.0005)
-    ap.add_argument("--sem-cache", action="store_true")
-    args = ap.parse_args()
+def veredito(teste: dict, bh_teste: dict) -> tuple[str, str]:
+    """Classifica o resultado fora da amostra. Retorna (símbolo, explicação)."""
+    lucrou = teste["retorno_total"] > 0
+    bateu_bh = teste["sharpe"] > bh_teste["sharpe"]
+    if teste["n_trades"] < MIN_TRADES_TESTE:
+        return "⚠️", "poucos trades no teste para qualquer conclusão estatística."
+    if lucrou and bateu_bh:
+        return "✅", "passou no teste fora da amostra. Próximo passo: paper trading (não é dinheiro real ainda)."
+    if lucrou:
+        return "⚠️", "lucrou, mas perdeu para comprar e segurar (em risco ajustado). Não justifica o trabalho e o risco."
+    return "❌", "reprovada: perdeu dinheiro fora da amostra."
 
-    custos = Custos(taxa=args.taxa, slippage=args.slippage)
-    df = baixar_candles(args.par, args.timeframe, args.inicio, usar_cache=not args.sem_cache)
 
-    corte = int(len(df) * args.treino)
+def estudar(
+    par: str,
+    timeframe: str,
+    inicio: str,
+    fracao_treino: float,
+    custos: Custos,
+    usar_cache: bool = True,
+) -> tuple[str, list[dict]]:
+    """Roda o estudo de um par.
+
+    Retorna (relatório em Markdown, resumo), onde o resumo tem uma linha por
+    estratégia com os números da combinação escolhida no treino.
+    """
+    df = baixar_candles(par, timeframe, inicio, usar_cache=usar_cache)
+
+    corte = int(len(df) * fracao_treino)
     treino_idx, teste_idx = df.index[:corte], df.index[corte:]
     df_treino, df_teste = df.loc[treino_idx], df.loc[teste_idx]
 
     linhas_rel: list[str] = []
     add = linhas_rel.append
 
-    add(f"# Backtest {args.par} · {args.timeframe}\n")
+    add(f"# Backtest {par} · {timeframe}\n")
     add(f"Gerado em {datetime.now(timezone.utc):%Y-%m-%d %H:%M} UTC.\n")
     add(f"- **Dados:** {len(df):,} candles, de {df.index[0]:%Y-%m-%d} a {df.index[-1]:%Y-%m-%d}")
     add(f"- **Treino:** {treino_idx[0]:%Y-%m-%d} → {treino_idx[-1]:%Y-%m-%d} ({len(df_treino):,} candles)")
@@ -63,11 +80,11 @@ def main() -> None:
         f"= {custos.por_lado*100:.2f}% (ida e volta: {2*custos.por_lado*100:.2f}%)\n")
 
     bh = comprar_e_segurar(df)
-    bh_treino = avaliar(df_treino, bh.loc[treino_idx], custos, args.timeframe)
-    bh_teste = avaliar(df_teste, bh.loc[teste_idx], custos, args.timeframe)
+    bh_treino = avaliar(df_treino, bh.loc[treino_idx], custos, timeframe)
+    bh_teste = avaliar(df_teste, bh.loc[teste_idx], custos, timeframe)
 
     total_testadas = 0
-    resumo_final = []
+    resumo: list[dict] = []
 
     for nome, cfg in GRADES.items():
         funcao, grade = cfg["funcao"], cfg["params"]
@@ -77,8 +94,8 @@ def main() -> None:
         tabela = []
         for p in grade:
             sinal = funcao(df, **p)  # indicadores só olham para trás, então calcular no df inteiro é seguro
-            m_tr = avaliar(df_treino, sinal.loc[treino_idx], custos, args.timeframe)
-            m_te = avaliar(df_teste, sinal.loc[teste_idx], custos, args.timeframe)
+            m_tr = avaliar(df_treino, sinal.loc[treino_idx], custos, timeframe)
+            m_te = avaliar(df_teste, sinal.loc[teste_idx], custos, timeframe)
             tabela.append({"params": p, "treino": m_tr, "teste": m_te})
 
         # 2) escolhe a melhor olhando SÓ o treino (maior Sharpe com nº mínimo de trades)
@@ -110,7 +127,21 @@ def main() -> None:
                 f"| {t['teste']['retorno_total']*100:.1f}% | {t['teste']['n_trades']} |")
         add("\n</details>\n")
 
-        resumo_final.append((nome, melhor))
+        simbolo, explicacao = veredito(melhor["teste"], bh_teste)
+        resumo.append(
+            {
+                "par": par,
+                "estrategia": nome,
+                "params": melhor["params"],
+                "treino": melhor["treino"],
+                "teste": melhor["teste"],
+                "bh_teste": bh_teste,
+                "n_combos": len(grade),
+                "positivas_teste": positivas_teste,
+                "simbolo": simbolo,
+                "explicacao": explicacao,
+            }
+        )
 
     add("## Comprar e segurar (referência)\n")
     add("| Métrica | Treino | Teste |")
@@ -121,27 +152,40 @@ def main() -> None:
     add("")
 
     add("## Veredito automático\n")
-    for nome, melhor in resumo_final:
-        te = melhor["teste"]
-        ok_lucro = te["retorno_total"] > 0
-        ok_bh = te["sharpe"] > bh_teste["sharpe"]
-        ok_trades = te["n_trades"] >= 30
-        if ok_lucro and ok_bh and ok_trades:
-            v = "✅ passou no teste fora da amostra. Próximo passo: paper trading (não é dinheiro real ainda)."
-        elif ok_lucro and not ok_bh:
-            v = "⚠️ lucrou, mas perdeu para comprar e segurar (em risco ajustado). Não justifica o trabalho e o risco."
-        elif not ok_trades:
-            v = "⚠️ poucos trades no teste para qualquer conclusão estatística."
-        else:
-            v = "❌ reprovada: perdeu dinheiro fora da amostra."
-        add(f"- **{nome.replace('_', ' ')}**: {v}")
+    for r in resumo:
+        add(f"- **{r['estrategia'].replace('_', ' ')}**: {r['simbolo']} {r['explicacao']}")
     add(f"\nTotal de combinações testadas neste estudo: **{total_testadas}**. "
         "Lembre: quanto mais combinações, maior a chance de uma parecer boa por pura sorte.")
 
-    relatorio = "\n".join(linhas_rel)
+    return "\n".join(linhas_rel), resumo
+
+
+def salvar_relatorio(relatorio: str, par: str, timeframe: str) -> Path:
     PASTA_RESULTADOS.mkdir(exist_ok=True)
-    saida = PASTA_RESULTADOS / f"relatorio_{args.par}_{args.timeframe}.md"
+    saida = PASTA_RESULTADOS / f"relatorio_{par}_{timeframe}.md"
     saida.write_text(relatorio, encoding="utf-8")
+    return saida
+
+
+def argumentos_comuns(ap: argparse.ArgumentParser) -> None:
+    """Opções compartilhadas entre este script e o `rodar_varios.py`."""
+    ap.add_argument("--timeframe", default="1H", choices=list(metricas.CANDLES_POR_ANO))
+    ap.add_argument("--inicio", default="2023-01-01")
+    ap.add_argument("--treino", type=float, default=0.7, help="fração dos dados usada para otimizar")
+    ap.add_argument("--taxa", type=float, default=0.0010)
+    ap.add_argument("--slippage", type=float, default=0.0005)
+    ap.add_argument("--sem-cache", action="store_true")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--par", default="BTC-USDT")
+    argumentos_comuns(ap)
+    args = ap.parse_args()
+
+    custos = Custos(taxa=args.taxa, slippage=args.slippage)
+    relatorio, _ = estudar(args.par, args.timeframe, args.inicio, args.treino, custos, not args.sem_cache)
+    saida = salvar_relatorio(relatorio, args.par, args.timeframe)
     print(relatorio)
     print(f"\nRelatório salvo em: {saida}")
 
