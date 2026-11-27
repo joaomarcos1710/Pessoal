@@ -7,3 +7,4 @@ Assessor pessoal do João Marcos, rodando com o Claude.
 | Rotina diária do assessor (Gmail → pastas, contatos, Notion, lembretes, diário) | [`rotinas/assessor-diario.md`](rotinas/assessor-diario.md) |
 | Atalho do iPhone (Notion → Lembretes e Diário da Apple) | [`docs/atalho-iphone.md`](docs/atalho-iphone.md) |
 | Painel Radar de Oportunidades (corridas, descontos, cashback) | https://claude.ai/artifact/LZ5e1iGmfrnwQF1BrCmvxd |
+| Backtester de estratégias de cripto (fase 1: pesquisa, sem ordens reais) | [`cripto-bot/`](cripto-bot/README.md) |
