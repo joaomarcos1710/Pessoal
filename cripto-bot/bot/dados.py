@@ -21,6 +21,23 @@ PASTA_CACHE = Path(__file__).resolve().parent.parent / "dados"
 COLUNAS = ["ts", "open", "high", "low", "close", "volume"]
 
 
+def _buscar(sessao: requests.Session, params: dict, tentativas: int = 6) -> dict:
+    """Faz uma chamada à API, repetindo com espera crescente se der erro de rede
+    ou se a OKX responder 429 (limite de requisições estourado)."""
+    for n in range(tentativas):
+        try:
+            resp = sessao.get(URL, params=params, timeout=20)
+            if resp.status_code == 429 or resp.status_code >= 500:
+                raise requests.HTTPError(f"HTTP {resp.status_code}")
+            resp.raise_for_status()
+            return resp.json()
+        except (requests.ConnectionError, requests.Timeout, requests.HTTPError):
+            if n == tentativas - 1:
+                raise
+            time.sleep(2 ** n)  # 1 s, 2 s, 4 s, ...
+    raise RuntimeError("inalcançável")
+
+
 def baixar_candles(
     par: str = "BTC-USDT",
     timeframe: str = "1H",
@@ -52,9 +69,7 @@ def baixar_candles(
         if after is not None:
             params["after"] = str(after)
 
-        resp = sessao.get(URL, params=params, timeout=20)
-        resp.raise_for_status()
-        corpo = resp.json()
+        corpo = _buscar(sessao, params)
         if corpo.get("code") != "0":
             raise RuntimeError(f"Erro da OKX: {corpo}")
 
